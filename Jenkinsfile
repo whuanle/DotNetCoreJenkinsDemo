@@ -1,25 +1,33 @@
 pipeline {
 
-    // 全局环境变量
+     // 全局环境变量
     environment {
-        IMAGENAME     = 'webdemo'       // 镜像名称
-        IMAGETAG      = '1.0.0'         // 镜像标签
-        APPPORT       = '8089'          // 应用占用的端口
-        APPDIR        = '/opt/app'      // 应用工作的目录
+        // 编译阶段的变量
+        PROJDIR    =   'JenkinsDemo/src/WebDemo'                         // 项目路径
+        PROJNAME   =   'JenkinsDemo/src/WebDemo/WebDemo.csproj'          // 要发布的主项目的 .csproj 文件路径
+
+        // IIS 配置，远程发布的变量
+        IISTMP     =   'C:/webdemo_tmp'                            // 用于打包发布的临时目录
+        IISAPP     =   'jenkinsdemo.com'                           // 网站名称
+        IISADDR    =   'https://192.168.0.66:8172/msdeploy.axd'    // WebDeploy 的地址
+        IISUSER    =   'jenkinesdemo'                                    // 用于登录到 IIS 的账号密码
+        IISADMIN   =   'jenkinesdemo'                
     }
 
+    
+    // 此流水线选择 windows 系统进行构建，如果你没有多节点，请注释
     agent {
-        docker {
-            image 'mcr.microsoft.com/dotnet/sdk:3.1' 
-            args '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker'
-        }
+        node {
+            label 'windows'
     }
-    stages {
+  }
 
-        
-        // 开始构建，debug、test，在此过程中还原程序nuget依赖、输出 debug、单元测试等
+    // 开始构建流水线
+    stages {
+        // 还原包
         stage('Build') { 
             steps {
+                sh 'env'
                 sh 'dotnet restore'
             }
         }
@@ -30,34 +38,54 @@ pipeline {
                 sh 'dotnet test  --logger "console;verbosity=detailed"  --blame  --logger trx'
             }
         }
-        
+
         // 正式发布
         stage('Publish') { 
             steps {
-                sh 'dotnet publish src/WebDemo -c Release'
+                sh 'dotnet publish "${PROJNAME}" -c Release'
             }
         }
 
-        // 部署应用，
-        // 这里选择将应用打包为 docker 镜像
-        stage('Deploy') { 
+    // 打包部署
+    stage('Deploy') {
+      steps {
 
-            steps {
-                sh  'touch Dockerfile'
-                sh  'env'
-                sh  'echo "start edit Dockerfile"'
-                sh  'echo "FROM mcr.microsoft.com/dotnet/aspnet:3.1" >> Dockerfile'
-                sh  'echo "COPY src/WebDemo/bin/Release/netcoreapp3.1/publish ${APPDIR}" >> Dockerfile'
-                sh  'echo "EXPOSE ${APPPORT}" >> Dockerfile'
-                sh  'echo "WORKDIR ${APPDIR}" >> Dockerfile'
-                sh  'echo \'ENTRYPOINT ["dotnet", "WebDemo.dll"]\' >> Dockerfile'
+          script {
+            powershell """
+            rm -r ${IISTMP}
+            """
+          }
 
-                sh 'cat Dockerfile'
-                sh "docker build -t ${IMAGENAME}:${IMAGETAG} ."
-            }
-        }
+           script {
+            powershell """
+            mkdir ${IISTMP}
+            mkdir ${IISTMP}/deploy
+            """
+          }
 
-        // 后续还可以执行 Docker 命令部署镜像，再使用健康检查等 API 检查容器是否正常，实现自动回退
+          script {
+            powershell """
+            cp "${WORKSPACE}/${PROJDIR}/bin/Release/netcoreapp3.1/publish/*" ${IISTMP}/deploy/ -r
+            """
+          }
+
+        // 打包网站
+          script {
+            powershell """
+                msdeploy.exe -verb:sync -source:iisApp="${IISTMP}/deploy" -dest:package="${IISTMP}/web.zip"
+            """
+          }
+
+        // 远程部署文档
+        // https://blog.richardszalay.com/2012/12/17/demystifying-msdeploy-skip-rules/
+         script {
+            powershell """
+               msdeploy.exe -verb:sync -source:package="${IISTMP}/web.zip" -dest:iisApp=${IISAPP},wmsvc=${IISADDR},username=${IISUSER},password=${IISADMIN},skipAppCreation=false -allowUntrusted=true -skip:objectName="filePath",absolutePath="vue\$",skipAction=Delete
+            """
+          }
+      }
+     }
 
     }
+
 }
